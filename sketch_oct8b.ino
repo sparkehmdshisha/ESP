@@ -1,0 +1,254 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include "max6675.h"
+
+int thermoDO1 = 19;
+int thermoCS1 = 23;
+int thermoCLK1 = 5; 
+// Test
+
+int thermoDO2 = 12;
+int thermoCS2 = 13;
+int thermoCLK2 = 15;
+
+// Hotspot-SSID und Passwort
+const char* ssid = "Toms iphone 14";  // Ersetze dies durch die SSID des iPhone-Hotspots Vodafone-B96C_24GH
+const char* password = "Tom_12345";  // Ersetze dies durch das Passwort des Hotspots kegmPz3PRPaX7RM
+
+MAX6675 thermocouple1(thermoCLK1, thermoCS1, thermoDO1);
+MAX6675 thermocouple2(thermoCLK2, thermoCS2, thermoDO2);
+
+WebServer server(80);
+
+// Variablen zum Speichern der letzten gemessenen Temperaturen
+float lastTemp1 = 0.0;
+float lastTemp2 = 0.0;
+
+// Variablen zur Speicherung des Rauchstatus
+String smokeStatus = "Kein Rauch";
+bool recording = false; // Flag, um die Aufnahme zu steuern
+unsigned long startTime = 0; // Zeit, wann die Aufnahme gestartet wurde
+String csvData = ""; // Variable zur Speicherung der CSV-Daten
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Verbindung zum iPhone-Hotspot herstellen
+  // Erzwingt, dass der ESP32-S3 moderne WPA3/PMF-Verbindungen akzeptiert
+  WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK); 
+  WiFi.begin(ssid, password);
+  Serial.print("Verbindung zum WLAN wird hergestellt");
+
+  // Warte, bis die Verbindung hergestellt ist
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.println("Versuch fehlgeschlagen.");
+  }
+  
+  Serial.println("");
+  Serial.println("WLAN verbunden!");
+  Serial.print("IP Adresse: ");
+  Serial.println(WiFi.localIP());
+  
+  // Webserver initialisieren
+  server.on("/", handleRoot);
+  server.on("/temperature", handleTemperature);
+  server.on("/start", handleStart);
+  server.on("/stop", handleStop);
+  server.on("/setSmoke", handleSetSmoke);
+  server.on("/download", handleDownload);
+
+  server.begin();
+  Serial.println("Webserver gestartet");
+}
+
+void loop() {
+  server.handleClient();  // Webserver-Client bearbeiten
+}
+
+// Funktion zum Rendern der Webseite
+void handleRoot() {
+  String html = "<html>"
+                "<head>"
+                "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                "<style>"
+                "body { font-family: Arial, sans-serif; background-color: #f4f4f4; margin: 0; padding: 20px; }"
+                "h1 { color: #333; }"
+                ".container { max-width: 600px; margin: auto; padding: 20px; border-radius: 8px; background-color: #fff; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1); }"
+                "button { background-color: #4CAF50; color: white; border: none; padding: 10px; border-radius: 5px; cursor: pointer; margin: 5px; }"
+                "button:hover { background-color: #45a049; }"
+                ".status { margin: 10px 0; font-size: 18px; }"
+                "#timer { font-size: 20px; color: #FF5733; }"
+                "#myChart { width: 100%; height: 400px; }"
+                "</style>"
+                "<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>"
+                "<script>"
+                "let recordingTime = 0;"
+                "let timerInterval = null;"
+                "let chart = null;"
+                "let temperatureData1 = [];"
+                "let temperatureData2 = [];"
+                "let labels = [];"
+                "let smokeStatus = '" + smokeStatus + "';"
+                "let backgroundColor1 = 'rgba(75, 192, 192, 0.2)';"
+                "let backgroundColor2 = 'rgba(153, 102, 255, 0.2)';"
+
+                "function initChart() {"
+                "  let ctx = document.getElementById('myChart').getContext('2d');"
+                "  chart = new Chart(ctx, {"
+                "    type: 'line',"
+                "    data: {"
+                "      labels: labels,"
+                "      datasets: [{"
+                "        label: 'Temperatur 1 (°C)',"
+                "        data: temperatureData1,"
+                "        backgroundColor: backgroundColor1,"
+                "        borderColor: 'rgba(75, 192, 192, 1)',"
+                "        fill: true"
+                "      }, {"
+                "        label: 'Temperatur 2 (°C)',"
+                "        data: temperatureData2,"
+                "        backgroundColor: backgroundColor2,"
+                "        borderColor: 'rgba(153, 102, 255, 1)',"
+                "        fill: true"
+                "      }]"
+                "    },"
+                "    options: {"
+                "      responsive: true,"
+                "      scales: {"
+                "        x: {"
+                "          title: { display: true, text: 'Zeit (s)' }"
+                "        },"
+                "        y: {"
+                "          title: { display: true, text: 'Temperatur (°C)' }"
+                "        }"
+                "      }"
+                "    }"
+                "  });"
+                "}"
+
+                "function updateTemperature() {"
+                "  var xhttp = new XMLHttpRequest();"
+                "  xhttp.onreadystatechange = function() {"
+                "    if (this.readyState == 4 && this.status == 200) {"
+                "      var temp = JSON.parse(this.responseText);"
+                "      labels.push(recordingTime + 's');"
+                "      temperatureData1.push(temp.temp1);"
+                "      temperatureData2.push(temp.temp2);"
+                "      chart.update();"
+                "      document.getElementById('temp1').innerHTML = temp.temp1 + ' °C';"
+                "      document.getElementById('temp2').innerHTML = temp.temp2 + ' °C';"
+                "    }"
+                "  };"
+                "  xhttp.open('GET', '/temperature', true);"
+                "  xhttp.send();"
+                "}"
+
+                "function setSmoke(status) {"
+                "  var xhttp = new XMLHttpRequest();"
+                "  xhttp.open('GET', '/setSmoke?status=' + status, true);"
+                "  xhttp.send();"
+                "  document.getElementById('smokeStatus').innerHTML = status;"
+                "  smokeStatus = status;"
+                "  updateBackgroundColor(status);"
+                "}"
+
+                "function updateBackgroundColor(status) {"
+                "  if (status === 'Kein Rauch') {"
+                "    backgroundColor1 = 'rgba(75, 192, 192, 0.2)';"
+                "    backgroundColor2 = 'rgba(153, 102, 255, 0.2)';"
+                "  } else if (status === 'Leichter Rauch') {"
+                "    backgroundColor1 = 'rgba(255, 206, 86, 0.2)';"
+                "    backgroundColor2 = 'rgba(255, 159, 64, 0.2)';"
+                "  } else if (status === 'Optimaler Rauch') {"
+                "    backgroundColor1 = 'rgba(255, 99, 132, 0.2)';"
+                "    backgroundColor2 = 'rgba(54, 162, 235, 0.2)';"
+                "  }"
+                "  chart.data.datasets[0].backgroundColor = backgroundColor1;"
+                "  chart.data.datasets[1].backgroundColor = backgroundColor2;"
+                "  chart.update();"
+                "}"
+
+                "setInterval(updateTemperature, 2000);"
+                "function startRecording() {"
+                "  var xhttp = new XMLHttpRequest();"
+                "  xhttp.open('GET', '/start', true);"
+                "  xhttp.send();"
+                "  recordingTime = 0;"
+                "  timerInterval = setInterval(function() { recordingTime++; document.getElementById('timer').innerHTML = 'Aufnahmezeit: ' + recordingTime + 's'; }, 1000);"
+                "}"
+                "function stopRecording() {"
+                "  var xhttp = new XMLHttpRequest();"
+                "  xhttp.open('GET', '/stop', true);"
+                "  xhttp.send();"
+                "  clearInterval(timerInterval);"
+                "  document.getElementById('timer').innerHTML = '';"
+                "}"
+                "function downloadCSV() {"
+                "  window.location.href = '/download';"
+                "}"
+                "window.onload = function() { initChart(); };"
+                "</script>"
+                "</head>"
+                "<body>"
+                "<div class='container'>"
+                "<h1>Temperaturdaten</h1>"
+                "<p>Thermoelement 1: <span id='temp1'>Lade...</span></p>"  
+                "<p>Thermoelement 2: <span id='temp2'>Lade...</span></p>"
+                "<h2 class='status'>Rauchstatus: <span id='smokeStatus'>" + smokeStatus + "</span></h2>"
+                "<button onclick=\"setSmoke('Kein Rauch')\">Kein Rauch</button>"
+                "<button onclick=\"setSmoke('Leichter Rauch')\">Leichter Rauch</button>"
+                "<button onclick=\"setSmoke('Optimaler Rauch')\">Optimaler Rauch</button>"
+                "<button onclick=\"startRecording()\">Start</button>"
+                "<button onclick=\"stopRecording()\">Stop</button>"
+                "<button onclick=\"downloadCSV()\">Download CSV</button>"
+                "<p id='timer'></p>"
+                "<canvas id='myChart'></canvas>"
+                "</div>"
+                "</body>"
+                "</html>";
+  server.send(200, "text/html", html);
+}
+
+// Temperaturwerte als JSON senden
+void handleTemperature() {
+  float temp1 = thermocouple1.readCelsius();
+  float temp2 = thermocouple2.readCelsius();
+
+  if (recording) {
+    unsigned long currentTime = (millis() - startTime) / 1000;
+    csvData += String(currentTime) + "," + String(temp1) + "," + String(temp2) + "," + smokeStatus + "\n";
+  }
+
+  String json = "{\"temp1\": " + String(temp1) + ", \"temp2\": " + String(temp2) + "}";
+  server.send(200, "application/json", json);
+}
+
+// Start der Aufnahme
+void handleStart() {
+  recording = true;
+  startTime = millis();
+  csvData = "Zeit (s),Temperatur 1 (°C),Temperatur 2 (°C),Rauchstatus\n";  // CSV-Kopfzeile
+  server.send(200, "text/plain", "Aufnahme gestartet");
+}
+
+// Stoppen der Aufnahme
+void handleStop() {
+  recording = false;
+  server.send(200, "text/plain", "Aufnahme gestoppt");
+}
+
+// Rauchstatus setzen
+void handleSetSmoke() {
+  if (server.hasArg("status")) {
+    smokeStatus = server.arg("status");
+    server.send(200, "text/plain", "Rauchstatus aktualisiert");
+  } else {
+    server.send(400, "text/plain", "Fehler: Kein Rauchstatus angegeben");
+  }
+}
+
+// CSV-Datei zum Download anbieten
+void handleDownload() {
+  server.send(200, "text/csv", csvData);
+}
